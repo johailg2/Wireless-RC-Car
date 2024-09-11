@@ -1,0 +1,258 @@
+#include <XBee.h> 
+#include <Printers.h> 
+#include <SoftwareSerial.h> 
+#include <string.h> 
+#define rxpin 0 
+#define txpin 1 
+#define STOP_CODE '0' 
+#define FORWARD_CODE '1' 
+#define BACK_CODE '2' 
+#define LEFT_CODE '3' 
+#define RIGHT_CODE '4' 
+#define FORWARD_LEFT_CODE '5' 
+#define FORWARD_RIGHT_CODE '6' 
+#define BACK_LEFT_CODE '7' 
+#define BACK_RIGHT_CODE '8' 
+/* 
+* Variables declaration 
+*/ 
+typedef enum{STARTING_SETUP,WAITING_FOR_OK,SETTING_ROLE,SETTING_PAN_ID, ATDH, ATDL, ATCN, SETUP_DONE}Xbee_Setup_State; 
+static bool setup_done = false; 
+static char send_buffer [64] = {0}; 
+static char receive_buffer [256] = {0}; 
+static int buffer_counter_send = 0; 
+static int receive_buffer_head = 0; 
+static int receive_buffer_tail = 0; 
+static long TimeChecker = 0; 
+static long PreviousTime = 0; 
+const int buttonpin_forward = 2;  
+const int buttonpin_back = 3;  
+const int buttonpin_left= 4;  
+const int buttonpin_right = 5;  
+const int buttonpin_stop = 6; 
+int button_state_forward = 0; 
+int button_state_back = 0; 
+int button_state_left = 0; 
+int button_state_right = 0; 
+int button_state_stop = 0; 
+int counter = 0; 
+/* 
+* Function declaration 
+*/ 
+void button_functions(void);  
+void add_to_send_buffer(char byte_to_send); 
+void setup_Xbee(void); 
+void clear_send_buffer(void); 
+void send_data_to_xbee(char payload); 
+XBee xbee = XBee(); 
+SoftwareSerial Xbee_Pins(rxpin,txpin); 
+/* 
+* Function definitions 
+*/
+void setup() { 
+ Xbee_Pins.begin (9600); 
+  
+ pinMode (rxpin,INPUT); 
+ pinMode(txpin,OUTPUT); 
+  
+ pinMode(LED_BUILTIN,OUTPUT); 
+ pinMode(buttonpin_forward, INPUT_PULLUP); 
+ pinMode(buttonpin_back, INPUT_PULLUP); 
+ pinMode(buttonpin_left, INPUT_PULLUP); 
+ pinMode(buttonpin_right, INPUT_PULLUP); 
+ pinMode(buttonpin_stop, INPUT_PULLUP); 
+  
+ xbee.setSerial(Xbee_Pins); 
+} 
+void loop() { 
+ if (setup_done == false) 
+ { 
+ TimeChecker = micros(); 
+ //Reading the data from last ten microseconds  if (TimeChecker - PreviousTime >= 10) 
+ { 
+ while (Xbee_Pins.available() > 0) 
+ { 
+ receive_buffer[receive_buffer_head] = Xbee_Pins.read();  receive_buffer_head++; 
+ } 
+ PreviousTime = TimeChecker;  
+ } 
+ setup_Xbee(); 
+ } 
+ else 
+ { 
+ delay(250); 
+ counter++; 
+ if (counter%2 == 0) 
+ { 
+ digitalWrite(LED_BUILTIN,HIGH); 
+ } 
+ else 
+ { 
+ button_functions(); 
+ } 
+ } 
+} 
+void send_data_to_xbee(char payload) 
+{ 
+ add_to_send_buffer(payload); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ digitalWrite(LED_BUILTIN,LOW); 
+  
+}
+void button_functions(void) 
+{ 
+ button_state_forward = digitalRead (buttonpin_forward);  button_state_back = digitalRead (buttonpin_back);  button_state_left = digitalRead (buttonpin_left);  button_state_right = digitalRead (buttonpin_right);  button_state_stop = digitalRead (buttonpin_stop); 
+  
+ if (button_state_forward == LOW) 
+ { 
+ if (button_state_left == LOW) 
+ { 
+ send_data_to_xbee(FORWARD_LEFT_CODE);  } 
+ else if (button_state_right == LOW) 
+ { 
+ send_data_to_xbee(FORWARD_RIGHT_CODE);  } 
+ else 
+ { 
+ send_data_to_xbee(FORWARD_CODE);  } 
+ } 
+ else if (button_state_left == LOW) 
+ { 
+ send_data_to_xbee(LEFT_CODE); 
+ } 
+ else if (button_state_right == LOW) 
+ { 
+ send_data_to_xbee(RIGHT_CODE); 
+ } 
+ else if (button_state_stop == LOW) 
+ { 
+ send_data_to_xbee(STOP_CODE); 
+ } 
+} 
+/* 
+* Below functions are for configuring the xbee */ 
+void add_to_send_buffer(char byte_to_send){  send_buffer[buffer_counter_send] = byte_to_send;  buffer_counter_send++; 
+ if (buffer_counter_send > 63) 
+ { 
+ buffer_counter_send = 0; 
+ } 
+} 
+void clear_send_buffer(void){ 
+ memset(send_buffer, 0, 64); 
+ buffer_counter_send = 0; 
+}
+void setup_Xbee(void){ //setting up the Xbee, sending +++ is a action that needs to be done   static bool found_O = false; 
+ static Xbee_Setup_State current_state = STARTING_SETUP; 
+ static Xbee_Setup_State previous_state = STARTING_SETUP; 
+ switch (current_state) 
+ { 
+ case STARTING_SETUP: 
+ { 
+ char byte_to_send_temp = '+'; 
+ add_to_send_buffer(byte_to_send_temp); 
+ add_to_send_buffer(byte_to_send_temp); 
+ add_to_send_buffer(byte_to_send_temp); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send); 
+ delay(1000); 
+ clear_send_buffer(); 
+ current_state = WAITING_FOR_OK; 
+ } 
+ break; 
+  
+ case WAITING_FOR_OK: 
+ { 
+ while (receive_buffer_tail < receive_buffer_head) 
+ {  
+ if (receive_buffer[receive_buffer_tail] == 'O') 
+ { 
+ found_O = true; 
+ } 
+  
+ if (found_O == true) 
+ { 
+ if (receive_buffer[receive_buffer_tail] == 'K') 
+ {  
+ found_O = false; 
+ switch (previous_state) 
+ { 
+ case STARTING_SETUP: 
+ { 
+ current_state = ATDH; 
+ previous_state = ATDH; 
+ } 
+ break; 
+  
+ case ATDH: 
+ { 
+ current_state = ATDL; 
+ previous_state = ATDL; 
+ } 
+ break; 
+  
+ case ATDL: 
+ { 
+ current_state = ATCN; 
+ previous_state = ATCN; 
+ } 
+ break; 
+  
+ case ATCN: 
+ { 
+ current_state = SETUP_DONE;
+  
+  
+ } 
+ } 
+ } 
+ } 
+ receive_buffer_tail++; 
+ } 
+ } 
+ break; 
+ case ATDH: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('D'); 
+ add_to_send_buffer('H'); 
+ add_to_send_buffer('0'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break; 
+ case ATDL: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('D'); 
+ add_to_send_buffer('L'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break; 
+  
+ case ATCN: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('C'); 
+ add_to_send_buffer('N'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break; 
+  
+ case SETUP_DONE: 
+ { 
+ setup_done = true; 
+ receive_buffer_head = 0; 
+ receive_buffer_tail = 0;
+ memset (receive_buffer,0,256);  } 
+ } 
+}

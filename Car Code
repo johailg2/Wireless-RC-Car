@@ -1,0 +1,297 @@
+#include <XBee.h> 
+#include <Printers.h> 
+#include <SoftwareSerial.h> 
+#include <string.h> 
+#define LEFT_MOTOR 0 
+#define RIGHT_MOTOR 1  
+#define rxpin 0 
+#define txpin 1 
+#define STOP_CODE '0' 
+#define FORWARD_CODE '1' 
+#define BACK_CODE '2' 
+#define LEFT_CODE '3' 
+#define RIGHT_CODE '4' 
+#define FORWARD_LEFT_CODE '5' 
+#define FORWARD_RIGHT_CODE '6' 
+#define BACK_LEFT_CODE '7' 
+#define BACK_RIGHT_CODE '8' 
+/* 
+* Variable declaration 
+*/ 
+typedef enum{STARTING_SETUP,WAITING_FOR_OK,SETTING_ROLE,SETTING_PAN_ID, ATDH, ATDL, ATCN, SETUP_DONE}Xbee_Setup_State; 
+static bool setup_done = false; 
+static char send_buffer [64] = {0}; 
+static char receive_buffer [256] = {0}; 
+static int buffer_counter_send = 0; 
+static int receive_buffer_head = 0; 
+static int receive_buffer_tail = 0; 
+static long TimeChecker = 0; 
+static long PreviousTime = 0; 
+static int counter = 0; 
+volatile long long encoder_counter[2] = {0,0}; 
+static unsigned long lastmillis = 0; 
+int motor_directional_pin[2] = {8,9}; 
+int pwm_pin[2] = {10,11}; 
+int target_rpm[2] = {0,0}; 
+unsigned int duty = 0; 
+const float kp = 1; 
+const float ki = 1; 
+int conversion_factor[2] = {220,220}; 
+/* 
+* Function declaration 
+*/ 
+void add_to_send_buffer(char byte_to_send); 
+void setup_Xbee(void); 
+void clear_send_buffer(void); 
+void send_to_xbee(uint8_t *buff); 
+void handle_received_data(char one_byte); 
+void set_pwm(void); 
+XBee xbee = XBee(); 
+SoftwareSerial Xbee_Pins(rxpin,txpin);
+/* 
+* Function Defintion 
+*/ 
+void setup() { 
+ attachInterrupt(0, left_rpm_handler, RISING); 
+ attachInterrupt(1, right_rpm_handler, RISING);  analogWrite(motor_directional_pin[LEFT_MOTOR],OUTPUT);  analogWrite(motor_directional_pin[RIGHT_MOTOR],OUTPUT);  analogWrite(motor_directional_pin[LEFT_MOTOR],HIGH);  analogWrite(motor_directional_pin[RIGHT_MOTOR],HIGH);  analogWrite (pwm_pin[LEFT_MOTOR],OUTPUT);  analogWrite (pwm_pin[RIGHT_MOTOR],OUTPUT);  analogWrite(pwm_pin[LEFT_MOTOR], 0); 
+ analogWrite(pwm_pin[RIGHT_MOTOR], 0); 
+ pinMode (rxpin,INPUT); 
+ pinMode(txpin,OUTPUT); 
+ Xbee_Pins.begin (9600); 
+ pinMode(LED_BUILTIN,OUTPUT); 
+} 
+void loop() { 
+  
+ TimeChecker = micros(); 
+ if (TimeChecker - PreviousTime >= 100) 
+ { 
+ while (Xbee_Pins.available() > 0) 
+ { 
+ receive_buffer[receive_buffer_head] = Xbee_Pins.read();  receive_buffer_head++; 
+ if (receive_buffer_head > 255) 
+ { 
+ receive_buffer_head = 0; 
+ } 
+ } 
+ PreviousTime = TimeChecker; 
+  
+ } 
+ if (millis() - lastmillis > 100) 
+ { //Uptade every one second  
+ set_pwm(target_rpm[LEFT_MOTOR], LEFT_MOTOR);  set_pwm(target_rpm[RIGHT_MOTOR], RIGHT_MOTOR);  lastmillis = millis(); 
+ } 
+ if (setup_done == false) 
+ { 
+ setup_Xbee(); 
+ }  
+ else 
+ { 
+ //digitalWrite(LED_BUILTIN,HIGH); 
+ if (receive_buffer_head != receive_buffer_tail)  { 
+ counter++; 
+ if (counter%2 == 0) 
+ { 
+ //digitalWrite(LED_BUILTIN,HIGH); 
+ } 
+ if (counter%2 == 1) 
+ { 
+ //digitalWrite(LED_BUILTIN,LOW);
+ } 
+ char one_byte = receive_buffer[receive_buffer_tail];  handle_received_data(one_byte); 
+ receive_buffer_tail++; 
+ if (receive_buffer_tail > 255) 
+ { 
+ receive_buffer_tail = 0; 
+ } 
+ } 
+ } 
+} 
+void handle_received_data(char one_byte) 
+{ 
+ if (one_byte == FORWARD_CODE) 
+ { 
+ target_rpm[LEFT_MOTOR] = 255; 
+ target_rpm[RIGHT_MOTOR] = 255; 
+ } 
+ else if (one_byte == LEFT_CODE) 
+ { 
+ target_rpm[LEFT_MOTOR] = 0; 
+ target_rpm[RIGHT_MOTOR] = 255; 
+ } 
+ else if (one_byte == RIGHT_CODE) 
+ { 
+ target_rpm[LEFT_MOTOR] = 255; 
+ target_rpm[RIGHT_MOTOR] = 0;  
+ } 
+ else if (one_byte == STOP_CODE) 
+ { 
+ target_rpm[LEFT_MOTOR] = 0; 
+ target_rpm[RIGHT_MOTOR] = 0; 
+ } 
+ else if (one_byte == FORWARD_LEFT_CODE)  { 
+ target_rpm[LEFT_MOTOR] = 175; 
+ target_rpm[RIGHT_MOTOR] = 255; 
+ } 
+ else if (one_byte == FORWARD_RIGHT_CODE)  { 
+ target_rpm[LEFT_MOTOR] = 255; 
+ target_rpm[RIGHT_MOTOR] = 175; 
+ } 
+} 
+void add_to_send_buffer(char byte_to_send){  send_buffer[buffer_counter_send] = byte_to_send;  buffer_counter_send++; 
+ if (buffer_counter_send > 63) 
+ { 
+ buffer_counter_send = 0; 
+ } 
+} 
+void clear_send_buffer(void){
+ memset(send_buffer, 0, 64); 
+ buffer_counter_send = 0; 
+} 
+void setup_Xbee(void){ //setting up the Xbee, sending +++ is a action that needs to be done   static bool found_O = false; 
+ static Xbee_Setup_State current_state = STARTING_SETUP; 
+ static Xbee_Setup_State previous_state = STARTING_SETUP; 
+ switch (current_state) 
+ { 
+ case STARTING_SETUP: 
+ { 
+ char byte_to_send_temp = '+'; 
+ add_to_send_buffer(byte_to_send_temp); 
+ add_to_send_buffer(byte_to_send_temp); 
+ add_to_send_buffer(byte_to_send_temp); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send); 
+ delay(1000); 
+ clear_send_buffer(); 
+ current_state = WAITING_FOR_OK; 
+ } 
+ break; 
+  
+ case WAITING_FOR_OK: 
+ { 
+ while (receive_buffer_tail < receive_buffer_head) 
+ {  
+ if (receive_buffer[receive_buffer_tail] == 'O') 
+ { 
+ found_O = true; 
+ } 
+  
+ if (found_O == true) 
+ { 
+ if (receive_buffer[receive_buffer_tail] == 'K') 
+ {  
+ found_O = false; 
+ switch (previous_state) 
+ { 
+ case STARTING_SETUP: 
+ { 
+ current_state = ATDH; 
+ previous_state = ATDH; 
+  
+ } 
+ break; 
+  
+ case ATDH: 
+ { 
+ current_state = ATDL; 
+ previous_state = ATDL; 
+ } 
+ break; 
+  
+ case ATDL: 
+ { 
+ current_state = ATCN; 
+ previous_state = ATCN;
+ } 
+ break; 
+  
+ case ATCN: 
+ { 
+ current_state = SETUP_DONE;   
+  
+ } 
+ } 
+ } 
+ } 
+ receive_buffer_tail++; 
+ } 
+ } 
+ break; 
+ case ATDH: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('D'); 
+ add_to_send_buffer('H'); 
+ add_to_send_buffer('0'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break; 
+ case ATDL: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('D'); 
+ add_to_send_buffer('L'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('f'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break; 
+  
+ case ATCN: 
+ { 
+ add_to_send_buffer('A'); 
+ add_to_send_buffer('T'); 
+ add_to_send_buffer('C'); 
+ add_to_send_buffer('N'); 
+ add_to_send_buffer('\r'); 
+ Xbee_Pins.write(send_buffer,buffer_counter_send);  clear_send_buffer(); 
+ current_state = WAITING_FOR_OK;  
+ } 
+ break;
+  
+ case SETUP_DONE: 
+ { 
+ counter = 0; 
+ setup_done = true; 
+ receive_buffer_head = 0; 
+ receive_buffer_tail = 0; 
+ memset (receive_buffer,0,256); 
+ } 
+ } 
+} 
+void left_rpm_handler() 
+ { 
+ encoder_counter[LEFT_MOTOR] ++; 
+ } 
+void right_rpm_handler() 
+{ 
+ encoder_counter[RIGHT_MOTOR] ++; 
+} 
+int get_duty(long rpm) 
+{  
+ int duty = rpm *0.83; 
+ return duty; 
+} 
+void set_pwm(int target_speed, int motor_side) 
+ { 
+ unsigned int rpm = 0; 
+ int rpm_error = 0; 
+ int rpm_error_overtime = 0; 
+  
+ detachInterrupt(0);//Disable interrupt when calculating 
+ detachInterrupt(1); 
+ rpm = ((encoder_counter[motor_side])*conversion_factor[motor_side]) / (millis() - lastmillis);  rpm_error = target_speed - rpm; 
+ rpm_error_overtime += rpm_error*(millis()-lastmillis); 
+ duty = get_duty(target_speed); 
+ duty = duty + (kp*rpm_error) + (ki*rpm_error_overtime); 
+ analogWrite(pwm_pin[motor_side],duty); 
+ encoder_counter[motor_side] = 0; 
+ attachInterrupt(0, left_rpm_handler, RISING); 
+ attachInterrupt(1, right_rpm_handler, RISING); 
+ }
